@@ -1,0 +1,96 @@
+name: task-validate
+
+# Runs the publication gates on every task the PR touched.
+#
+# Only changed tasks, because calibrating a 300-task corpus on every PR would
+# take longer than anyone will wait for — and a gate people route around is
+# worse than no gate.
+
+on:
+  pull_request:
+    paths:
+      - "tasks/**"
+      - "tests/fixtures/tasks/**"
+      - "src/autobench/taskspec/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  AUTOBENCH_ENVIRONMENT: development
+  AUTOBENCH_EXECUTOR: local
+  AUTOBENCH_QUEUE: memory
+  PYTHONPATH: src
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev]"
+
+      - name: Find changed tasks
+        id: changed
+        run: |
+          dirs=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+                 | grep -E '^(tasks|tests/fixtures/tasks)/' \
+                 | awk -F/ '{ if ($1=="tasks") print $1"/"$2"/"$3; else print $1"/"$2"/"$3"/"$4 }' \
+                 | sort -u \
+                 | while read -r d; do [ -f "$d/task.toml" ] && echo "$d"; done)
+          echo "dirs<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$dirs" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Changed tasks:"; echo "$dirs"
+
+      - name: Run every gate
+        if: steps.changed.outputs.dirs != ''
+        run: |
+          failed=0
+          {
+            echo "## Task validation"
+            echo
+          } > gates.md
+
+          while read -r dir; do
+            [ -z "$dir" ] && continue
+            echo "::group::$dir"
+            if autobench validate "$dir" --deep --json > "report.json"; then
+              echo "- ✅ \`$dir\`" >> gates.md
+            else
+              failed=1
+              echo "- ❌ \`$dir\`" >> gates.md
+              python - <<'PY' >> gates.md
+          import json
+          for report in json.load(open("report.json")):
+              for gate in report.get("gates", []):
+                  if gate["status"] != "failed":
+                      continue
+                  print(f"  - **{gate['gate']}** — {gate['detail']}")
+                  for finding in gate["findings"][:5]:
+                      print(f"    - `{finding['file']}:{finding['line']}` {finding['message']}")
+                      print(f"      _{finding['remediation']}_")
+          PY
+            fi
+            echo "::endgroup::"
+          done <<< "${{ steps.changed.outputs.dirs }}"
+
+          cat gates.md >> "$GITHUB_STEP_SUMMARY"
+          exit $failed
+
+      - name: Comment the gate report
+        if: always() && steps.changed.outputs.dirs != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('gates.md')) return;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: fs.readFileSync('gates.md', 'utf8'),
+            });

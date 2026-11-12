@@ -1,0 +1,41 @@
+# Collector config.
+#
+# The filter processor is the safety net for content capture: even with
+# AUTOBENCH_CAPTURE_CONTENT=1, prompt and completion text can be dropped here
+# without touching application code. That is the whole reason the GenAI
+# conventions put content in span events rather than attributes.
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+  attributes/scrub:
+    actions:
+      - key: gen_ai.content
+        action: delete
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

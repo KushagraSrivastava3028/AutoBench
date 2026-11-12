@@ -1,0 +1,193 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every job runs without Docker, Postgres, Redis or an API key. The local
+  # executor and the deterministic mock model exist precisely so that a PR
+  # gets full pipeline coverage without spending money or provisioning a
+  # cluster.
+  AUTOBENCH_ENVIRONMENT: development
+  AUTOBENCH_EXECUTOR: local
+  AUTOBENCH_QUEUE: memory
+  AUTOBENCH_ARTIFACT_BACKEND: local
+  PYTHONPATH: src
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with: { enable-cache: true }
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev]"
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+      - name: mypy --strict
+        run: mypy src
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with: { enable-cache: true }
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev,export]"
+      - name: Unit
+        run: pytest tests/unit -q --cov=autobench --cov-report=xml
+      - name: Integration
+        run: pytest tests/integration -q
+      - name: End to end — the five user stories
+        run: pytest tests/e2e -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: autobench
+          POSTGRES_PASSWORD: autobench
+          POSTGRES_DB: autobench
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U autobench"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      AUTOBENCH_DATABASE_URL: postgresql+asyncpg://autobench:autobench@localhost:5432/autobench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv pip install --system -e "." psycopg2-binary
+      - name: Up and down cleanly
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+      - name: No un-migrated model changes
+        run: |
+          # An autogenerate that produces operations means someone edited a
+          # model without writing a migration. Catch it here, not in prod.
+          alembic revision --autogenerate -m "ci drift check" --rev-id ci_drift
+          if grep -qE "op\.(create|drop|alter|add)" \
+               src/autobench/db/migrations/versions/ci_drift_*.py; then
+            echo "::error::models have drifted from migrations; run 'make migration'"
+            cat src/autobench/db/migrations/versions/ci_drift_*.py
+            exit 1
+          fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: frontend }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - name: Backend for contract generation and browser acceptance
+        working-directory: .
+        run: uv pip install --system -e ".[dev]"
+      - name: Verify generated API contract
+        working-directory: .
+        run: |
+          python scripts/export_openapi.py
+          cd frontend
+          npm run gen:types
+          git diff --exit-code -- types/api.d.ts types/openapi.json
+      - name: Typecheck — zero `any`
+        run: npx tsc --noEmit
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Start local acceptance stack
+        working-directory: .
+        run: |
+          autobench seed
+          autobench serve --host 127.0.0.1 > /tmp/autobench-api.log 2>&1 &
+          autobench worker > /tmp/autobench-worker.log 2>&1 &
+          cd frontend
+          npm start -- --hostname 127.0.0.1 > /tmp/autobench-ui.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/healthz; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/autobench-api.log /tmp/autobench-ui.log
+          exit 1
+      - run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-acceptance
+          path: frontend/test-results
+
+  reference-suite:
+    # The harness proving itself: the oracle must score exactly 1.0 and the
+    # null agent exactly 0.0 on every published task. A failure here means a
+    # task is unsolvable or leaking, and every number computed from it is wrong.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev]"
+      - name: Static gates on every task
+        run: autobench validate tasks/
+      - name: Calibrate — oracle 1.0, null 0.0
+        run: autobench validate tasks/ --deep
+      - name: Run the reference suite
+        run: autobench run --suite core-reference --agent oracle --k 3 --json > run.json
+      - name: Assert a perfect oracle score
+        run: |
+          python - <<'PY'
+          import json, sys
+          result = json.load(open("run.json"))
+          metrics = result["metrics"]
+          if metrics["pass_at_1"]["point"] != 1.0:
+              sys.exit(f"oracle scored {metrics['pass_at_1']['point']}, not 1.0")
+          if metrics["infra_errors"]:
+              sys.exit(f"{metrics['infra_errors']} infrastructure errors")
+          print("oracle 1.000, zero infra errors")
+          PY
+
+  adversarial:
+    # The fixtures that fight the harness. Each one asserts a containment
+    # property, and each is a real failure mode someone has shipped.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev]"
+      - name: Negative fixtures must be rejected
+        run: |
+          set +e
+          autobench validate tests/fixtures/tasks/bad-output-grading
+          status=$?
+          set -e
+          if [ $status -eq 0 ]; then
+            echo "::error::bad-output-grading was accepted; the state-based and tolerance gates are broken"
+            exit 1
+          fi
+          echo "negative fixture correctly rejected"
+      - name: Tamper containment
+        run: pytest tests/integration/test_pipeline.py -q -k "delete or absent or freeze"

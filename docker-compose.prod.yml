@@ -1,0 +1,30 @@
+# Production overrides for a single 16-core / 64GB host (PRD §17.2).
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  ui:
+    environment:
+      AUTOBENCH_AUTH_REQUIRED: "true"
+  api:
+    environment:
+      AUTOBENCH_ENVIRONMENT: production
+      AUTOBENCH_AUTH_REQUIRED: "true"
+    deploy:
+      replicas: 2
+      resources: { limits: { cpus: "1", memory: 1G } }
+    ports: []            # behind your reverse proxy, not on the host
+  worker:
+    environment:
+      AUTOBENCH_ENVIRONMENT: production
+      AUTOBENCH_AUTH_REQUIRED: "true"
+      AUTOBENCH_WORKER__MAX_CONTAINERS: 4
+    deploy:
+      replicas: 4
+      resources: { limits: { cpus: "3", memory: 12G } }
+  postgres:
+    ports: []
+    deploy: { resources: { limits: { cpus: "2", memory: 8G } } }
+  redis:
+    ports: []
+    deploy: { resources: { limits: { cpus: "1", memory: 2G } } }
+  minio:
+    ports: []

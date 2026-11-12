@@ -1,0 +1,2 @@
+import Link from "next/link";
+export default function NotFound() { return <div className="panel p-12 text-center"><p className="eyebrow">404 · Not found</p><h1 className="text-3xl font-semibold">We couldn’t find that page.</h1><p className="my-4 text-sm text-ink-muted">The link may be out of date, or this evaluation may no longer be available.</p><Link className="btn btn-primary" href="/">Back to overview</Link></div>; }

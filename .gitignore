@@ -1,0 +1,52 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+dist/
+build/
+
+# node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# autobench local state
+.autobench/
+var/
+*.db
+*.db-journal
+*.sqlite3
+
+# env
+.env
+.env.local
+.env.*
+ops/ec2/*.env
+ops/ec2/secrets/
+!.env.example
+!*.env.example
+
+# artifacts
+frontend/types/api.d.ts.bak
+stitch_autobench_agent_evaluation_platform.zip
+frontend/test-results/
+frontend/playwright-report/
+*.log
+*.db-wal
+*.db-shm
+*.pem
+*.key
+
+# Retain the original UI handoff source, including its distributable reference.
+!/design-reference/AutoBench_UI/dist/
+!/design-reference/AutoBench_UI/dist/**

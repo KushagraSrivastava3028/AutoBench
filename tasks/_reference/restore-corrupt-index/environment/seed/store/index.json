@@ -1,0 +1,5 @@
+{
+           "user:1": {"file": "alpha.rec", "offset": 0},
+           "user:2": {"file": "alpha.rec", "offset": 99},
+           "order:10": {"file": "gamma.rec", "offset": 0}
+         }

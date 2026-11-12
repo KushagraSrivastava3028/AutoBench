@@ -1,0 +1,60 @@
+# The six alerts from PRD §13.3.
+#
+# InfraErrorRateHigh is the important one. It says the harness is lying, which
+# is worse than the harness being slow: a run with a 10% infra error rate
+# produces a number, and that number is wrong in a direction nobody can see.
+
+groups:
+  - name: autobench
+    rules:
+      - alert: InfraErrorRateHigh
+        expr: |
+          sum(rate(autobench_trial_errors_total{error_class=~"infra_.*|verifier_crash"}[10m]))
+            / clamp_min(sum(rate(autobench_trials_total[10m])), 0.001) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Infrastructure error rate above 5%"
+          description: >-
+            More than 5% of trials failed for harness reasons. Results from this
+            period are not trustworthy — investigate before reporting any score.
+
+      - alert: ProviderThrottling
+        expr: rate(autobench_provider_throttled_total[5m]) / clamp_min(rate(autobench_provider_requests_total[5m]), 0.001) > 0.02
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "429 rate above 2%"
+          description: "The Redis token bucket is mistuned; adding workers is now making the run slower."
+
+      - alert: ContainerLeak
+        expr: autobench_containers_active > on(worker_id) group_left() (autobench_lane_utilisation{lane="containers"} * 0 + 16)
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Containers outliving their trials"
+          description: "Teardown is failing. The disk will fill; check the reaper."
+
+      - alert: WorkerStale
+        expr: autobench_worker_heartbeat_age_seconds > 120
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker {{ $labels.hostname }} has stopped reporting"
+          description: "Its leases will expire and its trials will be re-queued by the reaper."
+
+      - alert: QueueStalled
+        expr: autobench_queue_depth > 0 and rate(autobench_trials_total[10m]) == 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Queue is not draining"
+          description: "Trials are queued but nothing is completing — total worker loss, or a deadlock."
+
+      - alert: CostSpike
+        expr: increase(autobench_cost_usd_total[1h]) > 2 * avg_over_time(increase(autobench_cost_usd_total[1h])[7d:1h])
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Spend is more than twice the rolling mean"
+          description: "Likely a runaway agent loop. Check per-run budgets."

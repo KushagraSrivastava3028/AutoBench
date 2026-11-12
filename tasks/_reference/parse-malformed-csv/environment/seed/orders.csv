@@ -1,0 +1,9 @@
+﻿id,customer,amount_cents,currency
+1,"Acme, Inc.",1050,USD
+2,Globex,2500,USD
+3,Initech,not-a-number,USD
+4,"Soylent ""Green"" Ltd",7325,EUR
+5,Umbrella,4000
+6,Stark Industries,1500,GBP,extra-column
+7,Wayne Enterprises,,USD
+8,Cyberdyne,9999,EUR

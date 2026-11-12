@@ -1,0 +1,10 @@
+[Unit]
+Description=AutoBench PostgreSQL and task backup to S3
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /srv/autobench/app/ops/ec2/backup.sh
+User=root
+UMask=0077

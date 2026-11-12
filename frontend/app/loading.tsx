@@ -1,0 +1,1 @@
+export default function Loading() { return <div aria-busy="true" aria-label="Loading page" className="space-y-5"><div className="skeleton" style={{ minHeight: 70, width: "45%" }} /><div className="skeleton" style={{ minHeight: 320 }} /></div>; }

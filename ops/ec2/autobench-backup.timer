@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly AutoBench application backup
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

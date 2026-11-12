@@ -1,0 +1,54 @@
+schema_version = "1.0"
+
+[task]
+id            = "restore-corrupt-index"
+version       = "1.0.0"
+title         = "Rebuild a corrupted on-disk index from the data files"
+category      = "debugging"
+difficulty    = "hard"
+tags          = ["python", "recovery"]
+author        = "kushagra"
+deterministic = true
+
+[environment]
+dockerfile = "environment/Dockerfile"
+workdir    = "/app"
+network    = "none"
+cpus       = 2.0
+memory     = "2g"
+pids_limit = 512
+tmpfs_size = "256m"
+
+[agent]
+timeout_sec    = 900
+max_tool_calls = 150
+max_tokens     = 400000
+
+[verifier]
+image       = "autobench/verifier-python:3.12"
+timeout_sec = 120
+tests_mount = "/opt/tests"
+command     = 'bash "$AUTOBENCH_TESTS_DIR/run-tests.sh"'
+network     = "none"
+
+[scoring]
+mode        = "weighted"
+report_path = "/tmp/autobench-report.json"
+
+[[scoring.items]]
+id     = "all_keys_present"
+weight = 0.4
+
+[[scoring.items]]
+id     = "offsets_correct"
+weight = 0.4
+
+[[scoring.items]]
+id     = "no_dangling_files"
+weight = 0.2
+
+[determinism]
+seed                    = 1337
+pinned_base_digest      = "sha256:0b1e0b3f1e1f2a6d9c1c2f6a8b5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2"
+freeze_time             = "2026-01-01T00:00:00Z"
+forbid_network_in_tests = true

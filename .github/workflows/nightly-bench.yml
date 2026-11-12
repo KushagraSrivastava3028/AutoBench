@@ -1,0 +1,97 @@
+name: nightly-bench
+
+# The job that keeps the benchmark honest over time.
+#
+# It re-runs the reference suite against a *pinned* model and re-measures the
+# harness speedup, so it alerts when the **harness** drifts independently of any
+# model change. Agents degrade silently — model updates change behaviour without
+# notice, tool APIs evolve, the task distribution shifts — so the eval suite is
+# treated as a regression suite: run on every material change and on a schedule
+# even when nothing changes.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: Concurrency levels to measure
+        default: "1,2,4,8,16"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  AUTOBENCH_ENVIRONMENT: development
+  AUTOBENCH_EXECUTOR: local
+  AUTOBENCH_QUEUE: memory
+  PYTHONPATH: src
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev]"
+
+      - name: Seed
+        run: autobench seed
+
+      - name: Measure the harness speedup
+        run: |
+          autobench bench-harness \
+            --suite tasks \
+            --agent oracle \
+            --concurrency "${{ inputs.concurrency || '1,2,4,8' }}" \
+            --repeats 3 \
+            --markdown \
+            --out "bench/harness-$(date -u +%Y-%m-%d).json"
+
+      - name: Enforce the G2 acceptance criterion
+        run: |
+          python - <<'PY'
+          import glob, json, sys
+          latest = max(glob.glob("bench/harness-*.json"))
+          report = json.load(open(latest))
+          acceptance = report["acceptance"]
+          print(report["headline"])
+          if not acceptance["passed"]:
+              sys.exit(f"::error::G2 acceptance failed: {acceptance['detail']}")
+          print("G2:", acceptance["detail"])
+          PY
+
+      - name: Regression report
+        run: |
+          autobench run --suite core-reference --agent oracle --k 3 --json > nightly.json
+          python - <<'PY'
+          import json
+          result = json.load(open("nightly.json"))
+          metrics = result["metrics"]
+          with open("report.md", "w") as handle:
+              handle.write("## Nightly reference suite\n\n")
+              handle.write(f"- pass@1 **{metrics['pass_at_1']['point']:.1%}** "
+                           f"±{metrics['pass_at_1']['margin']:.1%}\n")
+              handle.write(f"- pass^{metrics['k']} **{metrics['pass_caret_k']['point']:.1%}**\n")
+              handle.write(f"- reliability gap **{metrics['reliability_gap'] * 100:.1f} pts**\n")
+              handle.write(f"- infra errors **{metrics['infra_errors']}**\n")
+          PY
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the measurement
+        run: |
+          git config user.name "autobench-bot"
+          git config user.email "autobench-bot@users.noreply.github.com"
+          git add bench/
+          git diff --staged --quiet || git commit -m "bench: nightly harness measurement"
+          git push || echo "nothing to push"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: |
+            bench/*.json
+            report.md

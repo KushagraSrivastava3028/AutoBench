@@ -1,0 +1,21 @@
+{
+    email {$ACME_EMAIL}
+    admin off
+}
+
+{$AUTOBENCH_HOSTNAME} {
+    encode zstd gzip
+    request_body {
+        max_size 34MB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        Referrer-Policy "no-referrer"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+    # No access log: the OAuth callback query contains a one-use code.
+    reverse_proxy ui:3000 {
+        flush_interval -1
+    }
+}

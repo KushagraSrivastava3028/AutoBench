@@ -1,0 +1,158 @@
+# Standalone EC2 stack. Do not merge with the development Compose file.
+name: autobench-production
+
+x-app: &app
+  image: autobench-api:${AUTOBENCH_RELEASE:-local}
+  build: { context: ., target: base }
+  env_file: ["${AUTOBENCH_ENV_FILE:-./ops/ec2/production.env}"]
+  environment: &app-env
+    AUTOBENCH_ENVIRONMENT: production
+    AUTOBENCH_AUTH_REQUIRED: "true"
+    AUTOBENCH_EXECUTOR: docker
+    AUTOBENCH_QUEUE: redis
+    AUTOBENCH_ARTIFACT_BACKEND: s3
+    AUTOBENCH_S3_CREATE_BUCKET: "false"
+    AUTOBENCH_SANDBOX__RUNTIME: runsc
+    AUTOBENCH_SANDBOX__REQUIRE_NETWORK_NONE: "true"
+    AUTOBENCH_TASKS_DIR: /srv/autobench/tasks
+    AUTOBENCH_DOCKER_HOST: tcp://docker-proxy:2375
+    DOCKER_HOST: tcp://docker-proxy:2375
+  volumes:
+    # Same absolute path on host and containers: verifier binds resolve in the daemon.
+    - /srv/autobench/tasks:/srv/autobench/tasks
+  networks: [app, datastore, docker-control]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "16m", max-file: "3" }
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      AUTOBENCH_HOSTNAME: ${AUTOBENCH_HOSTNAME:?Set the public DNS hostname}
+      ACME_EMAIL: ${ACME_EMAIL:?Set the TLS certificate contact}
+    ports: ["80:80", "443:443"]
+    networks: [app]
+    volumes:
+      - ./ops/ec2/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      ui: { condition: service_healthy }
+
+  ui:
+    image: autobench-ui:${AUTOBENCH_RELEASE:-local}
+    build: { context: ./frontend }
+    restart: unless-stopped
+    environment:
+      AUTOBENCH_API_URL: http://api:8000
+      AUTOBENCH_AUTH_REQUIRED: "true"
+      AUTOBENCH_PUBLIC_URL: ${AUTOBENCH_PUBLIC_URL:?Set the exact HTTPS origin}
+      HOSTNAME: 0.0.0.0
+    networks: [app]
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 2g
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    healthcheck: { disable: true }
+    depends_on:
+      postgres: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+
+  api:
+    <<: *app
+    command: ["autobench", "serve"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      docker-proxy: { condition: service_started }
+    mem_limit: 2g
+
+  worker:
+    <<: *app
+    command: ["autobench", "worker"]
+    healthcheck: { disable: true }
+    environment:
+      <<: *app-env
+      AUTOBENCH_WORKER__MAX_CONTAINERS: "4"
+      AUTOBENCH_WORKER__MAX_DOCKER_OPS: "4"
+      AUTOBENCH_WORKER__MAX_VERIFIERS: "2"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      docker-proxy: { condition: service_started }
+    mem_limit: 4g
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: autobench
+      POSTGRES_DB: autobench
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Generate a strong database password}
+    networks: [datastore]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autobench -d autobench"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 8g
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:?Generate a strong Valkey password}
+    command: ["sh", "-c", "exec valkey-server --appendonly yes --maxmemory 1gb --maxmemory-policy noeviction --requirepass \"$$VALKEY_PASSWORD\""]
+    networks: [datastore]
+    volumes: [valkeydata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "VALKEYCLI_AUTH=\"$$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 2g
+
+  # Trusted API/worker only. This filters endpoint classes; it is not an
+  # ownership-aware authorization layer for arbitrary Docker API requests.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    networks: [docker-control]
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      BUILD: "1"
+      EXEC: "1"
+      POST: "1"
+      VOLUMES: "1"
+      NETWORKS: "0"
+      INFO: "0"
+      SECRETS: "0"
+      CONFIGS: "0"
+      SWARM: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SYSTEM: "0"
+      AUTH: "0"
+    volumes: [/var/run/docker.sock:/var/run/docker.sock:ro]
+
+networks:
+  app: {}
+  datastore: { internal: true }
+  docker-control: { internal: true }
+volumes:
+  pgdata: {}
+  valkeydata: {}
+  caddy-data: {}
+  caddy-config: {}

@@ -1,0 +1,13 @@
+.venv
+.autobench
+frontend
+**/__pycache__
+.git
+*.zip
+.env
+.env.*
+ops/ec2/*.env
+ops/ec2/secrets
+tests
+design-reference
+node_modules

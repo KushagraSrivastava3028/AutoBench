@@ -1,0 +1,200 @@
+# The full local stack: api, workers, Postgres, Redis, MinIO, OTel, Grafana.
+#
+#   make dev      brings this up
+#   make migrate  applies the schema
+#   make seed     registers the task corpus, agents, models and suites
+#
+# The worker reaches Docker through a socket *proxy*, never the socket itself.
+# See docs/security.md: a mounted socket is a root shell on the host, and it is
+# the one thing this project refuses under every justification.
+
+name: autobench
+
+x-common: &common
+  restart: unless-stopped
+  networks: [autobench]
+  logging:
+    driver: json-file
+    options: { max-size: "16m", max-file: "3" }
+
+x-app-env: &app-env
+  AUTOBENCH_ENVIRONMENT: development
+  AUTOBENCH_DATABASE_URL: postgresql+asyncpg://autobench:autobench@postgres:5432/autobench
+  AUTOBENCH_REDIS_URL: redis://redis:6379/0
+  AUTOBENCH_QUEUE: redis
+  AUTOBENCH_ARTIFACT_BACKEND: s3
+  AUTOBENCH_S3_ENDPOINT_URL: http://minio:9000
+  AUTOBENCH_S3_ACCESS_KEY: autobench
+  AUTOBENCH_S3_SECRET_KEY: autobench-dev-secret
+  AUTOBENCH_S3_CREATE_BUCKET: "true"
+  AUTOBENCH_OTLP_ENDPOINT: http://otel-collector:4317
+  AUTOBENCH_TASKS_DIR: /srv/autobench/tasks
+  AUTOBENCH_LOG_LEVEL: INFO
+  # Provider keys are read from your shell, never baked in. An empty value
+  # means that provider is simply unavailable.
+  AUTOBENCH_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AUTOBENCH_OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  AUTOBENCH_GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+
+services:
+  api:
+    <<: *common
+    build: { context: ., target: base }
+    command: ["autobench", "serve"]
+    environment:
+      <<: *app-env
+      AUTOBENCH_EXECUTOR: docker
+      AUTOBENCH_CORS_ORIGINS: http://localhost:3000
+    ports: ["8000:8000"]
+    volumes:
+      - ./tasks:/srv/autobench/tasks:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  worker:
+    <<: *common
+    build: { context: ., target: worker }
+    command: ["autobench", "worker"]
+    environment:
+      <<: *app-env
+      AUTOBENCH_EXECUTOR: docker
+      DOCKER_HOST: tcp://docker-proxy:2375
+      # Sizing rule: (cores / task.cpus) - 1. The minus one leaves headroom for
+      # the worker process, the daemon and the verifier lane; without it the
+      # host's own scheduler becomes a source of trial timeouts.
+      AUTOBENCH_WORKER__MAX_CONTAINERS: 6
+      AUTOBENCH_WORKER__MAX_DOCKER_OPS: 4
+      AUTOBENCH_WORKER__MAX_VERIFIERS: 4
+    volumes:
+      - ./tasks:/srv/autobench/tasks:ro
+    deploy:
+      replicas: 2
+    depends_on:
+      api: { condition: service_started }
+      docker-proxy: { condition: service_started }
+
+  # A filtered view of the Docker API. The worker can create and remove
+  # containers. This filters endpoint classes, not container ownership; only
+  # trusted control-plane services may access it.
+  docker-proxy:
+    <<: *common
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      BUILD: 1
+      EXEC: 1
+      POST: 1
+      VOLUMES: 1
+      NETWORKS: 1
+      # Explicitly denied, so a future edit has to be deliberate.
+      INFO: 0
+      SECRETS: 0
+      CONFIGS: 0
+      SWARM: 0
+      NODES: 0
+      PLUGINS: 0
+      SYSTEM: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Never published to the host: only the worker network may reach it.
+    expose: ["2375"]
+
+  postgres:
+    <<: *common
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: autobench
+      POSTGRES_PASSWORD: autobench
+      POSTGRES_DB: autobench
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autobench -d autobench"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    <<: *common
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    <<: *common
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: autobench
+      MINIO_ROOT_PASSWORD: autobench-dev-secret
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  otel-collector:
+    <<: *common
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./ops/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports: ["4317:4317", "8889:8889"]
+
+  prometheus:
+    <<: *common
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+
+  grafana:
+    <<: *common
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: autobench
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./ops/grafana:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["3001:3000"]
+    depends_on: [prometheus]
+
+  ui:
+    <<: *common
+    build: { context: ./frontend }
+    environment:
+      AUTOBENCH_API_URL: http://api:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+networks:
+  autobench:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  promdata:
+  grafanadata:
