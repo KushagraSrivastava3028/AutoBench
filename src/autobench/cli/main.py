@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import sys
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -206,11 +207,13 @@ def run(
     real deployment use ``autobench serve`` plus ``autobench worker``.
     """
     settings = _configure(verbose)
-    result = asyncio.run(
-        _run_suite(settings, suite, agent, model, k, concurrency, task, label, budget, seed)
-    )
+    # Progress and first-run catalogue messages must not corrupt redirected JSON.
+    with redirect_stdout(sys.stderr) if json_out else nullcontext():
+        result = asyncio.run(
+            _run_suite(settings, suite, agent, model, k, concurrency, task, label, budget, seed)
+        )
     if json_out:
-        console.print_json(json.dumps(result))
+        typer.echo(json.dumps(result))
         return
     _print_run_result(result)
     if result["metrics"]["total_trials"] == 0:
@@ -780,7 +783,10 @@ def replay(
             if match is None:
                 raise typer.BadParameter(f"no trial matching {trial!r}")
             trial_row, version = match
-            task = load_task(version.source_path)
+            source_path = version.source_path
+            if not source_path:
+                raise typer.BadParameter("The recorded task source is unavailable for replay.")
+            task = load_task(source_path)
             if task.content_hash != version.content_hash:
                 raise typer.BadParameter(
                     "Task source has changed; restore the recorded version before replay."
