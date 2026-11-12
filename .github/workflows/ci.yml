@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Every job runs without Docker, Postgres, Redis or an API key. The local
+  # Application tests use the local executor without paid provider keys. The local
   # executor and the deterministic mock model exist precisely so that a PR
   # gets full pipeline coverage without spending money or provisioning a
   # cluster.
@@ -25,10 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with: { enable-cache: true }
-      - run: uv python install 3.12
-      - run: uv pip install --system -e ".[dev]"
+      - uses: ./.github/actions/setup-python
       - run: ruff check src tests
       - run: ruff format --check src tests
       - name: mypy --strict
@@ -38,10 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with: { enable-cache: true }
-      - run: uv python install 3.12
-      - run: uv pip install --system -e ".[dev,export]"
+      - uses: ./.github/actions/setup-python
+        with:
+          extras: dev,export
       - name: Unit
         run: pytest tests/unit -q --cov=autobench --cov-report=xml
       - name: Integration
@@ -58,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:17-alpine
         env:
           POSTGRES_USER: autobench
           POSTGRES_PASSWORD: autobench
@@ -71,25 +67,16 @@ jobs:
       AUTOBENCH_DATABASE_URL: postgresql+asyncpg://autobench:autobench@localhost:5432/autobench
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.12
-      - run: uv pip install --system -e "." psycopg2-binary
+      - uses: ./.github/actions/setup-python
+        with:
+          extras: ""
       - name: Up and down cleanly
         run: |
           alembic upgrade head
           alembic downgrade base
           alembic upgrade head
       - name: No un-migrated model changes
-        run: |
-          # An autogenerate that produces operations means someone edited a
-          # model without writing a migration. Catch it here, not in prod.
-          alembic revision --autogenerate -m "ci drift check" --rev-id ci_drift
-          if grep -qE "op\.(create|drop|alter|add)" \
-               src/autobench/db/migrations/versions/ci_drift_*.py; then
-            echo "::error::models have drifted from migrations; run 'make migration'"
-            cat src/autobench/db/migrations/versions/ci_drift_*.py
-            exit 1
-          fi
+        run: alembic check
 
   frontend:
     runs-on: ubuntu-latest
@@ -103,11 +90,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.12
-      - name: Backend for contract generation and browser acceptance
-        working-directory: .
-        run: uv pip install --system -e ".[dev]"
+      - uses: ./.github/actions/setup-python
       - name: Verify generated API contract
         working-directory: .
         run: |
@@ -147,9 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.12
-      - run: uv pip install --system -e ".[dev]"
+      - uses: ./.github/actions/setup-python
       - name: Static gates on every task
         run: autobench validate tasks/
       - name: Calibrate — oracle 1.0, null 0.0
@@ -175,9 +156,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.12
-      - run: uv pip install --system -e ".[dev]"
+      - uses: ./.github/actions/setup-python
       - name: Negative fixtures must be rejected
         run: |
           set +e

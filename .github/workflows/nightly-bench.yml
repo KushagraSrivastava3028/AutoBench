@@ -33,9 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.12
-      - run: uv pip install --system -e ".[dev]"
+      - uses: ./.github/actions/setup-python
 
       - name: Seed
         run: autobench seed
